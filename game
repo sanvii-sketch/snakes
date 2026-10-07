@@ -1,0 +1,310 @@
+import os
+import random
+import sys
+import turtle
+from contextlib import closing
+
+import mysql.connector
+from mysql.connector import Error
+
+# ---------------------------------------------------------------- DATABASE
+# Credentials come from environment variables so they aren't hard-coded.
+DB_HOST = os.getenv("SNAKE_DB_HOST", "localhost")
+DB_USER = os.getenv("SNAKE_DB_USER", "root")
+DB_PASSWORD = os.getenv("SNAKE_DB_PASSWORD", "root")
+DB_NAME = os.getenv("SNAKE_DB_NAME", "snake_game")
+
+
+def get_conn(with_db=True):
+    return mysql.connector.connect(
+        host=DB_HOST,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        database=DB_NAME if with_db else None,
+    )
+
+
+def init_db():
+    """Create the database and tables if they don't exist yet."""
+    with closing(get_conn(with_db=False)) as conn, closing(conn.cursor()) as cur:
+        cur.execute(f"CREATE DATABASE IF NOT EXISTS `{DB_NAME}`")
+
+    with closing(get_conn()) as conn, closing(conn.cursor()) as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS players (
+                id         INT AUTO_INCREMENT PRIMARY KEY,
+                name       VARCHAR(12) NOT NULL UNIQUE,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS scores (
+                id        INT AUTO_INCREMENT PRIMARY KEY,
+                player_id INT NOT NULL,
+                score     INT NOT NULL,
+                length    INT NOT NULL,
+                played_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_scores_player (player_id),
+                FOREIGN KEY (player_id) REFERENCES players(id)
+            )
+        """)
+        conn.commit()
+
+
+def get_or_create_player(name):
+    with closing(get_conn()) as conn, closing(conn.cursor()) as cur:
+        cur.execute("INSERT IGNORE INTO players (name) VALUES (%s)", (name,))
+        conn.commit()
+        cur.execute("SELECT id FROM players WHERE name = %s", (name,))
+        return cur.fetchone()[0]
+
+
+def save_score(player_id, score, length):
+    with closing(get_conn()) as conn, closing(conn.cursor()) as cur:
+        cur.execute(
+            "INSERT INTO scores (player_id, score, length) VALUES (%s, %s, %s)",
+            (player_id, score, length),
+        )
+        conn.commit()
+
+
+def get_player_best(player_id):
+    with closing(get_conn()) as conn, closing(conn.cursor()) as cur:
+        cur.execute(
+            "SELECT COALESCE(MAX(score), 0) FROM scores WHERE player_id = %s",
+            (player_id,),
+        )
+        return int(cur.fetchone()[0])
+
+
+def get_player_stats(player_id):
+    """Returns (games_played, best_score, average_score)."""
+    with closing(get_conn()) as conn, closing(conn.cursor()) as cur:
+        cur.execute(
+            """SELECT COUNT(*), COALESCE(MAX(score), 0), COALESCE(AVG(score), 0)
+               FROM scores WHERE player_id = %s""",
+            (player_id,),
+        )
+        games, best, avg = cur.fetchone()
+        return int(games), int(best), round(float(avg), 1)
+
+
+def get_leaderboard(limit=5):
+    """Top players by their best score."""
+    with closing(get_conn()) as conn, closing(conn.cursor()) as cur:
+        cur.execute(
+            """SELECT p.name, MAX(s.score) AS best, COUNT(*) AS games
+               FROM scores s JOIN players p ON p.id = s.player_id
+               GROUP BY p.id, p.name
+               ORDER BY best DESC
+               LIMIT %s""",
+            (limit,),
+        )
+        return [(n, int(b), int(g)) for n, b, g in cur.fetchall()]
+
+
+# ---------------------------------------------------------------- SETUP
+try:
+    init_db()
+except Error as e:
+    sys.exit(f"Could not connect to MySQL: {e}\n"
+             "Check SNAKE_DB_HOST / SNAKE_DB_USER / SNAKE_DB_PASSWORD.")
+
+wg = turtle.Screen()
+wg.bgcolor("green")
+wg.title("snakesss")
+wg.setup(width=500, height=500)
+wg.tracer(0)
+
+name = (wg.textinput("Player", "Enter your name:") or "Player").strip()[:12] or "Player"
+player_id = get_or_create_player(name)
+high_score = get_player_best(player_id)
+
+head = turtle.Turtle()
+head.speed(0)
+head.shape("square")
+head.color("black")
+head.penup()
+head.goto(0, 0)
+head.direction = "stop"
+
+food = turtle.Turtle()
+food.speed(0)
+food.shape("circle")
+food.color("red")
+food.penup()
+food.goto(0, 100)
+
+segments = []
+
+pen = turtle.Turtle()
+pen.color("white")
+pen.penup()
+pen.hideturtle()
+pen.goto(0, 215)
+
+overlay = turtle.Turtle()
+overlay.color("white")
+overlay.penup()
+overlay.hideturtle()
+
+score = 0
+delay = 0.1
+overlay_visible = False
+
+
+def draw_score():
+    pen.clear()
+    pen.write(
+        f"{name}  score:{score}  best:{high_score}",
+        align="center",
+        font=("courier", 16, "normal"),
+    )
+
+
+# ---------------------------------------------------------------- OVERLAY
+def show_leaderboard(title="LEADERBOARD"):
+    global overlay_visible
+    games, best, avg = get_player_stats(player_id)
+    overlay.clear()
+    overlay.goto(0, 90)
+    overlay.write(title, align="center", font=("courier", 22, "bold"))
+    y = 55
+    rows = get_leaderboard(5)
+    if not rows:
+        overlay.goto(0, y)
+        overlay.write("No scores yet", align="center", font=("courier", 14, "normal"))
+    for rank, (n, b, g) in enumerate(rows, 1):
+        overlay.goto(0, y)
+        overlay.write(
+            f"{rank}. {n:<12} {b:>5}  ({g} games)",
+            align="center",
+            font=("courier", 13, "normal"),
+        )
+        y -= 25
+    overlay.goto(0, y - 15)
+    overlay.write(
+        f"You: {games} games, best {best}, avg {avg}",
+        align="center",
+        font=("courier", 12, "normal"),
+    )
+    overlay.goto(0, y - 45)
+    overlay.write("press W/A/S/D to play", align="center", font=("courier", 11, "normal"))
+    overlay_visible = True
+
+
+def hide_overlay():
+    global overlay_visible
+    if overlay_visible:
+        overlay.clear()
+        overlay_visible = False
+
+
+# ---------------------------------------------------------------- CONTROLS
+def go(direction, opposite):
+    if head.direction != opposite:
+        head.direction = direction
+        hide_overlay()
+
+
+def go_up():    go("up", "down")
+def go_down():  go("down", "up")
+def go_left():  go("left", "right")
+def go_right(): go("right", "left")
+
+
+def toggle_leaderboard():
+    if overlay_visible:
+        hide_overlay()
+    else:
+        head.direction = "stop"
+        show_leaderboard()
+
+
+wg.listen()
+wg.onkey(go_up, "w")
+wg.onkey(go_down, "s")
+wg.onkey(go_left, "a")
+wg.onkey(go_right, "d")
+wg.onkey(toggle_leaderboard, "l")
+
+
+# ---------------------------------------------------------------- GAME LOGIC
+def move():
+    if head.direction == "up":
+        head.sety(head.ycor() + 20)
+    elif head.direction == "down":
+        head.sety(head.ycor() - 20)
+    elif head.direction == "left":
+        head.setx(head.xcor() - 20)
+    elif head.direction == "right":
+        head.setx(head.xcor() + 20)
+
+
+def place_food():
+    occupied = {(round(s.xcor()), round(s.ycor())) for s in segments}
+    occupied.add((round(head.xcor()), round(head.ycor())))
+    while True:
+        pos = (random.randrange(-220, 221, 20), random.randrange(-220, 221, 20))
+        if pos not in occupied:
+            food.goto(pos)
+            return
+
+
+def game_over():
+    global score, delay, high_score
+    if score > 0:
+        save_score(player_id, score, len(segments) + 1)
+        high_score = max(high_score, score)
+    head.goto(0, 0)
+    head.direction = "stop"
+    for seg in segments:
+        seg.goto(1000, 1000)
+    segments.clear()
+    score = 0
+    delay = 0.1
+    draw_score()
+    show_leaderboard("GAME OVER")
+
+
+def game_loop():
+    global score, delay, high_score
+
+    if head.direction != "stop":
+        # move body: each segment follows the one in front of it
+        for i in range(len(segments) - 1, 0, -1):
+            segments[i].goto(segments[i - 1].xcor(), segments[i - 1].ycor())
+        if segments:
+            segments[0].goto(head.xcor(), head.ycor())
+
+        move()
+
+        # wall collision
+        if abs(head.xcor()) > 240 or abs(head.ycor()) > 240:
+            game_over()
+        # self collision
+        elif any(seg.distance(head) < 20 for seg in segments):
+            game_over()
+        # food
+        elif head.distance(food) < 20:
+            place_food()
+            seg = turtle.Turtle()
+            seg.speed(0)
+            seg.shape("square")
+            seg.color("grey")
+            seg.penup()
+            seg.goto(1000, 1000)
+            segments.append(seg)
+            score += 10
+            high_score = max(high_score, score)
+            delay = max(0.04, 0.1 - 0.002 * len(segments))
+            draw_score()
+
+    wg.update()
+    wg.ontimer(game_loop, int(delay * 1000))
+
+
+draw_score()
+show_leaderboard("WELCOME")
+game_loop()
+wg.mainloop()
