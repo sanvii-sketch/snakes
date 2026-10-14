@@ -4,10 +4,18 @@ This is a basic school project designed to improve basic python skills
 you can run the prg urself just ensure the following steps
 -->copy the attached code:https://github.com/sanvii-sketch/snakes.git
 
+
+
+
 -->make sure to hve the basic req:pip install mysql-connector-python
 
---># Windows (PowerShell)
+
+
+
+-->Windows (PowerShell)
 $env:SNAKE_DB_USER="root"; $env:SNAKE_DB_PASSWORD="yourpassword"
+
+
 
 
 macOS / Linux
