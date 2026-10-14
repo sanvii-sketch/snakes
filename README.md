@@ -1,4 +1,7 @@
 open for suggestions
+
+
+
 This is a basic school project 
 
 you can run the prg urself just ensure the following steps
